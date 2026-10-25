@@ -39,7 +39,14 @@ zstindex db.sqlite.zst                                    # appends the seek tab
 * `make test` runs this recipe every time, with a `zstd` CLI built from the same zstd release.
 
 ### WSL paths
-Databases under `\\wsl.localhost\<distro>\...` or `\\wsl$\...` (e.g. `/dev/shm`) are opened read-only through a lock-free VFS (`rovfs.c`): that share supports neither file locks nor shared-memory mapping. A live WAL database is read correctly (the WAL index is rebuilt in memory from `-wal`), and nothing is created, written or deleted next to the database. The same mode is used as a fallback when a normal open fails. It's a snapshot: reopen (F3) to refresh.
+Databases under `\\wsl.localhost\<distro>\...` or `\\wsl$\...` (e.g. `/dev/shm`) are opened read-only through a lock-free VFS (`rovfs.c`): that share supports neither file locks nor shared-memory mapping. A live WAL database is read correctly (the WAL index is rebuilt in memory from `-wal`), and nothing is created, written or deleted next to the database. The same mode is used as a fallback when a normal open fails. It isn't refreshed automatically: reopen (F3) to refresh.
+
+Without locks the reader can't hold off a writer on the Linux side, so the view may be inconsistent:
+* A checkpoint that rewrites pages of the main file while they're being read can produce a torn picture: rows from two different states, or a "database disk image is malformed" error.
+* The WAL index is built once, when the file is opened. The viewer reads pages lazily as you scroll, so if the writer checkpoints and restarts the `-wal` while the viewer stays open, later reads can fetch the wrong pages.
+* New frames appended to the `-wal` while reading are harmless: SQLite ignores incomplete ones by their checksums.
+
+This is fine for looking at a database, but don't treat what you see as an exact snapshot while a writer is busy. Reopen the file if something looks off.
 
 ### Building
 `make` downloads SQLite and zstd (`fetch-deps.sh`, pinned versions and checksums), runs the tests and a small benchmark, then builds `build/sqlite.wlx64`, `build/sqlite.wlx` and `build/sqlzst.exe`. `make zip` adds `build/sqlite-wlx.zip` with `pluginst.inf` for installing from Total Commander.
