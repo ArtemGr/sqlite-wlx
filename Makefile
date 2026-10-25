@@ -1,7 +1,7 @@
 # Cross-build with MinGW-w64 (Linux) or natively with MinGW (MSYS2):
 #   make            -> runs the tests and benchmark, then builds build/sqlite.wlx64, build/sqlite.wlx
-#                      and build/sqlzst.exe (the compressor, 64-bit); repeats the benchmark table last
-#   make zip        -> build/sqlite-wlx.zip (with pluginst.inf for TC auto-install)
+#                      and the 64-bit tools build/sqlzst.exe, build/zstindex.exe; repeats the benchmark table last
+#   make zip        -> build/sqlite-wlx.zip: plugin + pluginst.inf (TC auto-install), tools/, licenses
 #   make test       -> only the tests: VFS unit tests, tool tests (sqlzst; split + zstd + zstindex),
 #                      then a small benchmark; built natively for the host with HOSTCC
 # SQLite and zstd sources are downloaded by ./fetch-deps.sh on the first build.
@@ -23,7 +23,7 @@ else
 HOSTLIBS ?= -lpthread -lm
 endif
 
-all: test build/sqlite.wlx64 build/sqlite.wlx build/sqlzst.exe
+all: test build/sqlite.wlx64 build/sqlite.wlx build/sqlzst.exe build/zstindex.exe
 	@cat build/test/bench.txt
 
 $(DEPS):
@@ -38,6 +38,9 @@ build/sqlite.wlx: main.c zstdvfs.c rovfs.c $(DEPS)
 build/sqlzst.exe: tools/sqlzst.c $(DEPS)
 	mkdir -p build && x86_64-w64-mingw32-gcc -O2 -DZSTD_DISABLE_ASM $(INC) -static -s -o $@ tools/sqlzst.c \
 		include/sqlite3.c $(ZDEC) $(ZENC)
+
+build/zstindex.exe: tools/zstindex.c $(DEPS)
+	mkdir -p build && x86_64-w64-mingw32-gcc -O2 -DZSTD_DISABLE_ASM $(INC) -static -s -o $@ tools/zstindex.c $(ZDEC) $(ZENC)
 
 # --- tests: native host build ---
 HOSTCFLAGS = -O1 -DZSTD_DISABLE_ASM $(INC)
@@ -71,7 +74,11 @@ build/pluginst.inf:
 	mkdir -p build && printf '[plugininstall]\r\ndescription=SQLite viewer (sqlite-wlx), also opens zstd-seekable .zst and WSL paths\r\ntype=wlx\r\nfile=sqlite.wlx\r\ndefaultdir=sqlite-wlx\r\n' > $@
 
 zip: all build/pluginst.inf
-	cd build && rm -f sqlite-wlx.zip && zip -q sqlite-wlx.zip sqlite.wlx sqlite.wlx64 pluginst.inf
+	rm -rf build/pkg build/sqlite-wlx.zip && mkdir -p build/pkg/tools
+	cp build/sqlite.wlx build/sqlite.wlx64 build/pluginst.inf build/pkg/
+	cp build/sqlzst.exe build/zstindex.exe build/pkg/tools/
+	cp LICENSE build/pkg/LICENSE.txt && cp deps/zstd/LICENSE build/pkg/LICENSE-zstd.txt
+	cd build/pkg && zip -q -r ../sqlite-wlx.zip .
 
 clean:
 	rm -rf build

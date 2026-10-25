@@ -74,7 +74,7 @@ int sqlite3_rovfs_register(void);
 #define BLOB_VALUE             "(BLOB)"
 
 #define APP_NAME               TEXT("sqlite-wlx")
-#define APP_VERSION            TEXT("1.1.4")
+#define APP_VERSION            TEXT("1.2")
 
 #define LCS_FINDFIRST          1
 #define LCS_MATCHCASE          2

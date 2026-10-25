@@ -8,17 +8,29 @@
 **
 ** Every frame must record its decompressed size (zstd does this for regular files).
 */
+#ifndef _WIN32
+# define _FILE_OFFSET_BITS 64  /* 64-bit off_t for fseeko/ftello */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include "zstd.h"
 #include "zstd_seekable.h"
 
+#ifdef _WIN32  /* long is 32-bit on Windows: use 64-bit offsets for files over 2 GB */
+# define fseek64 _fseeki64
+# define ftell64 _ftelli64
+#else
+# define fseek64 fseeko
+# define ftell64 ftello
+#endif
+
 int main(int argc, char **argv){
   if( argc != 2 ){ fprintf(stderr, "usage: zstindex FILE.zst\n"); return 1; }
   FILE *f = fopen(argv[1], "rb");
   if( !f ){ perror(argv[1]); return 1; }
-  fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
-  unsigned char *buf = malloc(len);
+  fseek64(f, 0, SEEK_END); long long len = ftell64(f); fseek64(f, 0, SEEK_SET);
+  unsigned char *buf = (len > 0 && (unsigned long long)len <= (size_t)-1) ? malloc((size_t)len) : 0;
+  if( !buf ){ fprintf(stderr, "%s: cannot read %lld bytes into memory\n", argv[1], len); return 1; }
   if( fread(buf, 1, len, f) != (size_t)len ){ perror("read"); return 1; }
   fclose(f);
   ZSTD_seekable *probe = ZSTD_seekable_create();
@@ -27,12 +39,12 @@ int main(int argc, char **argv){
 
   ZSTD_frameLog *fl = ZSTD_seekable_createFrameLog(0 /* no checksums: frames carry their own */);
   unsigned n = 0; unsigned long long total = 0;
-  for(long off = 0; off < len; ){
+  for(long long off = 0; off < len; ){
     size_t c = ZSTD_findFrameCompressedSize(buf + off, len - off);
-    if( ZSTD_isError(c) ){ fprintf(stderr, "bad frame at %ld: %s\n", off, ZSTD_getErrorName(c)); return 1; }
+    if( ZSTD_isError(c) ){ fprintf(stderr, "bad frame at %lld: %s\n", off, ZSTD_getErrorName(c)); return 1; }
     unsigned long long d = ZSTD_getFrameContentSize(buf + off, c);
     if( d == ZSTD_CONTENTSIZE_UNKNOWN || d == ZSTD_CONTENTSIZE_ERROR ){
-      fprintf(stderr, "frame %u at %ld has no content size (compress files, not stdin, or use --stream-size)\n", n, off); return 1;
+      fprintf(stderr, "frame %u at %lld has no content size (compress files, not stdin, or use --stream-size)\n", n, off); return 1;
     }
     ZSTD_seekable_logFrame(fl, (unsigned)c, (unsigned)d, 0);
     off += c; total += d; n++;
