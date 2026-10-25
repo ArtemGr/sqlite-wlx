@@ -13,6 +13,9 @@
 #include <math.h>
 #include "include/sqlite3.h"
 
+int sqlite3_zstdvfs_register(int makeDefault);
+int sqlite3_rovfs_register(void);
+
 #define LVS_EX_AUTOSIZECOLUMNS 0x10000000
 
 #define WMU_UPDATE_GRID        WM_USER + 1
@@ -124,7 +127,7 @@ BOOL APIENTRY DllMain (HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 }
 
 void __stdcall ListGetDetectString(char* DetectString, int maxlen) {
-	snprintf(DetectString, maxlen, "MULTIMEDIA & ([0]=\"S\" & [1]=\"Q\" & [2]=\"L\" & [3]=\"i\" & [4]=\"t\" & [5]=\"e\")");
+	snprintf(DetectString, maxlen, "MULTIMEDIA & (([0]=\"S\" & [1]=\"Q\" & [2]=\"L\" & [3]=\"i\" & [4]=\"t\" & [5]=\"e\") | (EXT=\"ZST\" & [0]=40 & [1]=181 & [2]=47 & [3]=253))");
 }
 
 void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps) {
@@ -211,12 +214,61 @@ HWND APIENTRY ListLoadW (HWND hListerWnd, TCHAR* fileToLoad, int showFlags) {
 	
 	char* fileToLoad8 = utf16to8(fileToLoad);
 
+	// A zstd-compressed file (seekable format) is opened read-only through the "zstd" VFS
+	BOOL isZstd = FALSE;
+	FILE* zf = _tfopen(fileToLoad, TEXT("rb"));
+	if (zf) {
+		unsigned char magic[4] = {0};
+		isZstd = fread(magic, 1, 4, zf) == 4 && magic[0] == 0x28 && magic[1] == 0xB5 && magic[2] == 0x2F && magic[3] == 0xFD;
+		fclose(zf);
+	}
+
+	// Shares without file locking / shared memory (WSL's \\wsl.localhost\ and \\wsl$\) are read
+	// through the lock-free read-only "rovfs" VFS, which also reads a live WAL correctly
+	BOOL isWsl = _tcsnicmp(fileToLoad, TEXT("\\\\wsl.localhost\\"), 16) == 0 || _tcsnicmp(fileToLoad, TEXT("\\\\wsl$\\"), 7) == 0;
+
 	BOOL isEditable = getStoredValue(TEXT("editable"), 0);
 	sqlite3 *db = 0;
-	if (SQLITE_OK != sqlite3_open_v2(fileToLoad8, &db, (isEditable ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY) | SQLITE_OPEN_URI, NULL)) {
-		MessageBox(hListerWnd, TEXT("Error to open database"), fileToLoad, MB_OK);
-		free(fileToLoad8);
-		return NULL;
+	if (isZstd) {
+		// Not seekable or not an SQLite image: stay silent so TC can try the next plugin
+		if (SQLITE_OK != sqlite3_zstdvfs_register(0) ||
+			SQLITE_OK != sqlite3_open_v2(fileToLoad8, &db, SQLITE_OPEN_READONLY, "zstd") ||
+			SQLITE_OK != sqlite3_exec(db, "select 1 from sqlite_master limit 1", 0, 0, 0)) {
+			sqlite3_close(db);
+			free(fileToLoad8);
+			return NULL;
+		}
+		hasJournal = TRUE; // never offer to delete journal files
+	} else {
+		int rc = SQLITE_CANTOPEN;
+		if (!isWsl) {
+			rc = sqlite3_open_v2(fileToLoad8, &db, (isEditable ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY) | SQLITE_OPEN_URI, NULL);
+			if (rc == SQLITE_OK)
+				rc = sqlite3_exec(db, "select 1 from sqlite_master limit 1", 0, 0, 0);
+			if (rc != SQLITE_OK) {
+				sqlite3_close(db);
+				db = 0;
+			}
+		}
+
+		// Locking or shared-memory failure (e.g. a network share): retry lock-free and read-only
+		if (rc != SQLITE_OK && (rc & 0xFF) != SQLITE_NOTADB) {
+			rc = sqlite3_rovfs_register();
+			if (rc == SQLITE_OK)
+				rc = sqlite3_open_v2(fileToLoad8, &db, SQLITE_OPEN_READONLY, "rovfs");
+			if (rc == SQLITE_OK) {
+				sqlite3_db_config(db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, 0);
+				rc = sqlite3_exec(db, "select 1 from sqlite_master limit 1", 0, 0, 0);
+			}
+			hasJournal = TRUE; // never delete -wal/-shm that belong to another system's writer
+		}
+
+		if (rc != SQLITE_OK) {
+			sqlite3_close(db);
+			MessageBox(hListerWnd, TEXT("Error to open database"), fileToLoad, MB_OK);
+			free(fileToLoad8);
+			return NULL;
+		}
 	}
 	free(fileToLoad8);
 

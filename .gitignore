@@ -1,0 +1,6 @@
+# downloaded by fetch-deps.sh
+include/sqlite3.c
+include/sqlite3.h
+deps/
+# build output
+build/
